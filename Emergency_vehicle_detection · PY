@@ -1,0 +1,359 @@
+"""
+Emergency Vehicle Detection and Traffic Priority Module
+Part of Secure Vision System
+"""
+
+import cv2
+import torch
+import numpy as np
+from datetime import datetime
+import threading
+import time
+
+class EmergencyVehicleDetector:
+    """
+    Detects emergency vehicles (ambulances, police cars) and provides
+    traffic priority recommendations
+    """
+    
+    def __init__(self, yolo_model):
+        self.model = yolo_model
+        self.emergency_classes = ['ambulance', 'police car', 'fire truck']
+        self.detection_history = []
+        self.alert_active = False
+        
+    def detect_emergency_vehicle(self, frame):
+        """
+        Detect emergency vehicles in frame
+        
+        Returns:
+            emergency_detected (bool): Whether emergency vehicle is present
+            vehicle_info (dict): Information about detected vehicles
+        """
+        emergency_detected = False
+        vehicle_info = {
+            'count': 0,
+            'types': [],
+            'positions': [],
+            'confidence': []
+        }
+        
+        try:
+            # Run detection
+            results = self.model(frame)
+            detections = results.pandas().xyxy[0]
+            
+            for _, row in detections.iterrows():
+                cls = row['name'].lower()
+                conf = row['confidence']
+                
+                # Check for emergency vehicle patterns
+                # Since standard YOLO doesn't have emergency vehicle classes,
+                # we look for vehicle + color/pattern detection
+                if cls in ['car', 'truck', 'bus']:
+                    x1, y1, x2, y2 = map(int, [row['xmin'], row['ymin'], row['xmax'], row['ymax']])
+                    
+                    # Extract vehicle region
+                    vehicle_region = frame[y1:y2, x1:x2]
+                    
+                    # Check for emergency patterns (red/blue lights, white color)
+                    if self._check_emergency_patterns(vehicle_region):
+                        emergency_detected = True
+                        vehicle_info['count'] += 1
+                        vehicle_info['types'].append(cls)
+                        vehicle_info['positions'].append((x1, y1, x2, y2))
+                        vehicle_info['confidence'].append(conf)
+                        
+                        # Draw special bounding box for emergency vehicle
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                        cv2.putText(frame, "EMERGENCY VEHICLE", (x1, y1-10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        except Exception as e:
+            print(f"Emergency detection error: {e}")
+        
+        # Update detection history
+        self.detection_history.append({
+            'timestamp': datetime.now(),
+            'detected': emergency_detected,
+            'info': vehicle_info
+        })
+        
+        # Keep only last 50 detections
+        if len(self.detection_history) > 50:
+            self.detection_history.pop(0)
+        
+        return emergency_detected, vehicle_info
+    
+    def _check_emergency_patterns(self, vehicle_region):
+        """
+        Check for emergency vehicle visual patterns
+        This is a simplified version - can be enhanced with ML
+        """
+        if vehicle_region.size == 0:
+            return False
+        
+        try:
+            # Convert to HSV for color detection
+            hsv = cv2.cvtColor(vehicle_region, cv2.COLOR_BGR2HSV)
+            
+            # Detect red (for ambulance/fire truck)
+            lower_red1 = np.array([0, 100, 100])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([160, 100, 100])
+            upper_red2 = np.array([180, 255, 255])
+            
+            mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            red_mask = mask_red1 + mask_red2
+            
+            # Detect blue (for police)
+            lower_blue = np.array([100, 100, 100])
+            upper_blue = np.array([130, 255, 255])
+            blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+            
+            # Detect white (common for ambulances)
+            lower_white = np.array([0, 0, 200])
+            upper_white = np.array([180, 30, 255])
+            white_mask = cv2.inRange(hsv, lower_white, upper_white)
+            
+            # Calculate percentage of emergency colors
+            red_percent = (np.sum(red_mask > 0) / red_mask.size) * 100
+            blue_percent = (np.sum(blue_mask > 0) / blue_mask.size) * 100
+            white_percent = (np.sum(white_mask > 0) / white_mask.size) * 100
+            
+            # Emergency vehicle typically has significant red/blue/white
+            if red_percent > 15 or blue_percent > 15 or white_percent > 40:
+                return True
+        
+        except Exception as e:
+            print(f"Pattern check error: {e}")
+        
+        return False
+    
+    def get_traffic_recommendation(self):
+        """
+        Analyze recent detections and provide traffic control recommendation
+        
+        Returns:
+            recommendation (str): Traffic control action
+        """
+        if len(self.detection_history) < 5:
+            return "NORMAL_TRAFFIC"
+        
+        # Check last 10 frames
+        recent = self.detection_history[-10:]
+        emergency_count = sum(1 for d in recent if d['detected'])
+        
+        if emergency_count >= 5:
+            return "CLEAR_LANE_IMMEDIATELY"
+        elif emergency_count >= 3:
+            return "PREPARE_TO_CLEAR"
+        else:
+            return "NORMAL_TRAFFIC"
+
+
+class TrafficSignalController:
+    """
+    Controls traffic signals to give priority to emergency vehicles
+    """
+    
+    def __init__(self):
+        self.current_state = "GREEN_NS"  # North-South green
+        self.emergency_mode = False
+        self.state_history = []
+        
+    def handle_emergency_vehicle(self, direction):
+        """
+        Adjust traffic signals for emergency vehicle passage
+        
+        Args:
+            direction (str): Direction of emergency vehicle (NS, EW, etc.)
+        """
+        print(f"🚨 EMERGENCY VEHICLE DETECTED - Direction: {direction}")
+        print(f"🚦 Switching to emergency mode...")
+        
+        self.emergency_mode = True
+        
+        # Record current state
+        self.state_history.append({
+            'timestamp': datetime.now(),
+            'state': self.current_state,
+            'action': f'Emergency vehicle - {direction}'
+        })
+        
+        # Set priority green for emergency vehicle direction
+        if direction == "NS":
+            self.current_state = "GREEN_NS_PRIORITY"
+            print("✅ North-South lane cleared - GREEN")
+            print("🔴 East-West lane - RED")
+        elif direction == "EW":
+            self.current_state = "GREEN_EW_PRIORITY"
+            print("✅ East-West lane cleared - GREEN")
+            print("🔴 North-South lane - RED")
+        
+        # Hold for 30 seconds
+        threading.Timer(30.0, self.exit_emergency_mode).start()
+    
+    def exit_emergency_mode(self):
+        """Exit emergency mode and return to normal operation"""
+        print("✅ Emergency vehicle passed - Resuming normal traffic")
+        self.emergency_mode = False
+        self.current_state = "GREEN_NS"  # Return to normal
+    
+    def get_signal_state(self):
+        """Get current signal state"""
+        return {
+            'state': self.current_state,
+            'emergency_mode': self.emergency_mode,
+            'timestamp': datetime.now()
+        }
+
+
+class LaneManagementSystem:
+    """
+    Manages lane clearance for emergency vehicles
+    """
+    
+    def __init__(self):
+        self.active_alerts = []
+        
+    def trigger_lane_clearance(self, vehicle_position, estimated_speed):
+        """
+        Calculate and trigger lane clearance
+        
+        Args:
+            vehicle_position (tuple): (x, y) position of emergency vehicle
+            estimated_speed (float): Speed in km/h
+        """
+        # Calculate estimated time to intersection
+        # Simplified calculation - in real system use GPS/map data
+        distance_to_intersection = 200  # meters (example)
+        time_to_intersection = (distance_to_intersection / (estimated_speed * 1000 / 3600))
+        
+        alert = {
+            'timestamp': datetime.now(),
+            'position': vehicle_position,
+            'speed': estimated_speed,
+            'eta': time_to_intersection,
+            'status': 'ACTIVE'
+        }
+        
+        self.active_alerts.append(alert)
+        
+        print(f"🚨 LANE CLEARANCE ALERT")
+        print(f"   ETA to intersection: {time_to_intersection:.1f} seconds")
+        print(f"   Current speed: {estimated_speed:.1f} km/h")
+        print(f"   Action: Clear lanes immediately!")
+        
+        return alert
+    
+    def get_clearance_instructions(self, lane):
+        """
+        Get specific instructions for lane clearance
+        
+        Args:
+            lane (str): Lane identifier
+        """
+        instructions = {
+            'lane_1': 'Move to right shoulder',
+            'lane_2': 'Move to right shoulder',
+            'lane_3': 'Stay in position, emergency vehicle passing on left',
+            'intersection': 'Stop before intersection, wait for emergency vehicle'
+        }
+        
+        return instructions.get(lane, 'Follow traffic rules')
+
+
+# ========== INTEGRATION EXAMPLE ==========
+def demonstrate_emergency_system():
+    """
+    Demonstration of emergency vehicle detection and traffic management
+    """
+    print("=" * 60)
+    print("🚨 Emergency Vehicle Detection & Traffic Management Demo")
+    print("=" * 60)
+    
+    # Initialize components
+    print("\nInitializing system components...")
+    
+    # Load YOLO model
+    try:
+        model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True)
+        print("✅ YOLO model loaded")
+    except:
+        print("❌ Could not load YOLO model")
+        return
+    
+    # Initialize subsystems
+    ev_detector = EmergencyVehicleDetector(model)
+    traffic_controller = TrafficSignalController()
+    lane_manager = LaneManagementSystem()
+    
+    print("✅ All systems initialized\n")
+    
+    # Open video source
+    cap = cv2.VideoCapture(0)  # or video file
+    
+    if not cap.isOpened():
+        print("❌ Could not open video source")
+        return
+    
+    print("🎥 Video source active")
+    print("Press 'q' to quit\n")
+    
+    frame_count = 0
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame_count += 1
+        
+        # Process every 3rd frame for performance
+        if frame_count % 3 == 0:
+            # Detect emergency vehicles
+            emergency_detected, vehicle_info = ev_detector.detect_emergency_vehicle(frame)
+            
+            if emergency_detected:
+                # Get traffic recommendation
+                recommendation = ev_detector.get_traffic_recommendation()
+                
+                # Display alert on frame
+                cv2.putText(frame, f"🚨 EMERGENCY: {recommendation}",
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                
+                # Handle traffic control
+                if recommendation == "CLEAR_LANE_IMMEDIATELY":
+                    traffic_controller.handle_emergency_vehicle("NS")
+                    
+                    # Trigger lane clearance if vehicle detected
+                    if vehicle_info['positions']:
+                        pos = vehicle_info['positions'][0]
+                        lane_manager.trigger_lane_clearance(
+                            (pos[0], pos[1]),
+                            estimated_speed=60  # km/h estimate
+                        )
+            else:
+                cv2.putText(frame, "✅ Normal Traffic",
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+        # Display traffic signal state
+        signal_state = traffic_controller.get_signal_state()
+        cv2.putText(frame, f"Signal: {signal_state['state']}",
+                   (10, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        
+        # Show frame
+        cv2.imshow('Emergency Vehicle Detection', frame)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    cap.release()
+    cv2.destroyAllWindows()
+    print("\n✅ System shutdown complete")
+
+
+if __name__ == "__main__":
+    demonstrate_emergency_system()
